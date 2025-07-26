@@ -12,7 +12,7 @@ export class TimedBuffer implements INodeType {
 	description: INodeTypeDescription = {
 		displayName: 'Timed Buffer',
 		name: 'timedBuffer',
-		icon:'file:timedbuffer.svg',
+		icon: 'file:timedbuffer.svg',
 		group: ['transform'],
 		version: 1,
 		description:
@@ -87,103 +87,102 @@ export class TimedBuffer implements INodeType {
 	};
 
 	async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
-		const items = this.getInputData();
-
 		const resumeItems: INodeExecutionData[] = [];
 		const skippedItems: INodeExecutionData[] = [];
 		const credentials = await this.getCredentials<RedisCredential>('redis');
+		const redisClient = setupRedisClient(credentials);
 
-		if (!credentials) {
-			throw new Error('Redis credentials are not configured for this node.');
+		const { id } = this.getWorkflow();
+		let key = id! + this.getNodeParameter('sessionkey', 0);
+		const content = this.getNodeParameter('content', 0);
+		let waitAmount = this.getNodeParameter('amount', 0) as number;
+		const unit = this.getNodeParameter('unit', 0);
+
+		if (unit === 'minutes') {
+			waitAmount *= 60;
+		}
+		if (unit === 'hours') {
+			waitAmount *= 60 * 60;
+		}
+		if (unit === 'days') {
+			waitAmount *= 60 * 60 * 24;
 		}
 
-		const redisClient = setupRedisClient(credentials);
-		await redisClient.connect();
+		waitAmount *= 1000;
 
-		for (let i = 0; i < items.length; i++) {
+		const getBufferState = async (): Promise<BufferState | null> => {
 			try {
-				const key = this.getNodeParameter('sessionkey', i);
-				const content = this.getNodeParameter('content', i);
-				let waitAmount = this.getNodeParameter('amount', i) as number;
-				const unit = this.getNodeParameter('unit', i);
+				const val = await redisClient.get(key);
+				if (!val) return null;
+				return JSON.parse(val) as BufferState;
+			} catch (e) {
+				return null;
+			}
+		};
 
-				const getBufferState = async (): Promise<BufferState | null> => {
-					try {
-						const val = await redisClient.get(key);
-						if (!val) return null;
-						return JSON.parse(val) as BufferState;
-					} catch (e) {
-						return null;
-					}
+		try {
+			await redisClient.connect();
+
+			this.onExecutionCancellation(async () => {
+				await redisClient.del(key);
+				await redisClient.quit();
+			});
+
+			const existsBuffer = await getBufferState();
+
+			if (!existsBuffer) {
+				let bufferState = {
+					exp: Date.now() + waitAmount,
+					data: [content],
 				};
 
-				if (unit === 'minutes') {
-					waitAmount *= 60;
-				}
-				if (unit === 'hours') {
-					waitAmount *= 60 * 60;
-				}
-				if (unit === 'days') {
-					waitAmount *= 60 * 60 * 24;
-				}
+				await redisClient.set(key, JSON.stringify(bufferState));
 
-				waitAmount *= 1000;
-
-				const existsBuffer = await getBufferState();
-
-				if (!existsBuffer) {
-					let bufferState = {
-						exp: Date.now() + waitAmount,
-						data: [content],
-					};
-
-					await redisClient.set(key, JSON.stringify(bufferState));
-
-					let resume = false;
-					while (!resume) {
-						const refreshBuffer = await getBufferState();
-
-						if (!refreshBuffer) {
-							throw new Error(
-								`Error retrieving buffer state from Redis. Key: "${key}".` +
-									' Possible causes: nonexistent key, invalid JSON value, or connection error.',
-							);
-						}
-
-						waitAmount = Math.max(0, refreshBuffer.exp - Date.now());
-						resume = waitAmount === 0;
-						if (resume) break;
-						await new Promise((resolve) => setTimeout(resolve, waitAmount));
+				let resume = false;
+				while (!resume) {
+					const refreshBuffer = await getBufferState();
+					if (!refreshBuffer) {
+						throw new Error(
+							`Error retrieving buffer state from Redis. Key: "${key}".` +
+								' Possible causes: nonexistent key, invalid JSON value, or connection error.',
+						);
 					}
-
-					const buffer = await getBufferState();
-					await redisClient.del(key);
-					resumeItems.push({ json: { data: buffer!.data } });
-				} else {
-					const { data } = existsBuffer;
-					data.push(content);
-					let bufferState = {
-						exp: Date.now() + waitAmount,
-						data,
-					};
-
-					await redisClient.set(key, JSON.stringify(bufferState));
-					skippedItems.push({ json: {} });
-				}
-			} catch (error) {
-				if (this.continueOnFail()) {
-					resumeItems.push({
-						json: {
-							error: error.message,
-						},
+					waitAmount = Math.max(0, refreshBuffer.exp - Date.now());
+					resume = waitAmount === 0;
+					if (resume) break;
+					await new Promise((resolve) => {
+						const timer = setTimeout(resolve, waitAmount);
+						this.onExecutionCancellation(() => clearTimeout(timer));
 					});
-					continue;
 				}
-				throw new NodeOperationError(this.getNode(), error, { itemIndex: i });
+
+				const buffer = await getBufferState();
+				await redisClient.del(key);
+				resumeItems.push({ json: { data: buffer!.data } });
+			} else {
+				const { data } = existsBuffer;
+				data.push(content);
+				let bufferState = {
+					exp: Date.now() + waitAmount,
+					data,
+				};
+
+				await redisClient.set(key, JSON.stringify(bufferState));
+				skippedItems.push({ json: {} });
 			}
+		} catch (error) {
+			if (this.continueOnFail()) {
+				resumeItems.push({
+					json: {
+						error: error.message,
+					},
+				});
+			}
+			throw new NodeOperationError(this.getNode(), error);
+		} finally {
+			await redisClient.quit();
 		}
 
-		await redisClient.quit();
 		return [resumeItems, skippedItems];
 	}
 }
