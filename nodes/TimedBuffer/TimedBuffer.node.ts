@@ -83,6 +83,22 @@ export class TimedBuffer implements INodeType {
 				default: 'seconds',
 				description: 'The time unit of the Wait Amount value',
 			},
+			{
+				displayName: 'Options',
+				name: 'options',
+				type: 'collection',
+				placeholder: 'Add option',
+				default: {},
+				options: [
+					{
+						displayName: 'Avoid Key Collisions',
+						description: 'Whether to prevent key collisions when used across multiple workflows',
+						name: 'avoidCollisions',
+						type: 'boolean',
+						default: true,
+					},
+				],
+			},
 		],
 	};
 
@@ -92,11 +108,17 @@ export class TimedBuffer implements INodeType {
 		const credentials = await this.getCredentials<RedisCredential>('redis');
 		const redisClient = setupRedisClient(credentials);
 
-		const { id } = this.getWorkflow();
-		let key = id! + this.getNodeParameter('sessionkey', 0);
+		let key = this.getNodeParameter('sessionkey', 0);
 		const content = this.getNodeParameter('content', 0);
 		let waitAmount = this.getNodeParameter('amount', 0) as number;
 		const unit = this.getNodeParameter('unit', 0);
+		const { avoidCollisions } = this.getNodeParameter('options', 0) as { avoidCollisions?: boolean };
+
+		if (avoidCollisions) {
+			const { id } = this.getWorkflow();
+			// Add the workflow ID to the key to avoid collisions when the same key is used across different workflows
+			key = id! + key
+		}
 
 		if (unit === 'minutes') {
 			waitAmount *= 60;
@@ -157,7 +179,6 @@ export class TimedBuffer implements INodeType {
 				}
 
 				const buffer = await getBufferState();
-				await redisClient.del(key);
 				resumeItems.push({ json: { data: buffer!.data } });
 			} else {
 				const { data } = existsBuffer;
@@ -180,8 +201,11 @@ export class TimedBuffer implements INodeType {
 			}
 			throw new NodeOperationError(this.getNode(), error);
 		} finally {
+			await redisClient.del(key);
 			await redisClient.quit();
 		}
+
+		console.log("key:", key)
 
 		return [resumeItems, skippedItems];
 	}
