@@ -1,6 +1,6 @@
 {
   "name": "n8n-nodes-timed-buffer",
-  "version": "0.1.1",
+  "version": "1.0.0",
   "description": "Node that queues incoming string data and outputs it all at once after a defined time has passed",
   "keywords": [
     "n8n-community-node-package",
