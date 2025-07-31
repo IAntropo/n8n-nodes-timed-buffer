@@ -180,6 +180,7 @@ export class TimedBuffer implements INodeType {
 
 				const buffer = await getBufferState();
 				resumeItems.push({ json: { data: buffer!.data } });
+				await redisClient.del(key);
 			} else {
 				const { data } = existsBuffer;
 				data.push(content);
@@ -201,11 +202,8 @@ export class TimedBuffer implements INodeType {
 			}
 			throw new NodeOperationError(this.getNode(), error);
 		} finally {
-			await redisClient.del(key);
 			await redisClient.quit();
 		}
-
-		console.log("key:", key)
 
 		return [resumeItems, skippedItems];
 	}
